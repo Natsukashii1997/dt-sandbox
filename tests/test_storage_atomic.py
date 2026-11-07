@@ -1,0 +1,205 @@
+import json
+import os
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from todo_lite import storage
+from todo_lite.cli import main
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture
+def db(tmp_path):
+    return tmp_path / "todo.json"
+
+
+def _leftovers(directory: Path, db: Path) -> list[str]:
+    return sorted(p.name for p in directory.iterdir() if p != db)
+
+
+# ---- 原子写入 ----
+
+def test_save_writes_expected_json_and_no_temp_files(db):
+    storage.save(db, [{"text": "买牛奶", "done": False}])
+    assert json.loads(db.read_text(encoding="utf-8")) == {
+        "todos": [{"text": "买牛奶", "done": False}]
+    }
+    assert _leftovers(db.parent, db) == []
+
+
+def test_save_uses_tempfile_in_same_dir_fsync_and_replace(db, monkeypatch):
+    calls = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def spy_fsync(fd):
+        calls.append(("fsync", fd))
+        return real_fsync(fd)
+
+    def spy_replace(src, dst):
+        calls.append(("replace", Path(src), Path(dst)))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(storage.os, "fsync", spy_fsync)
+    monkeypatch.setattr(storage.os, "replace", spy_replace)
+
+    storage.save(db, [{"text": "a", "done": False}])
+
+    names = [c[0] for c in calls]
+    assert "replace" in names
+    # 数据文件的 fsync 必须发生在 replace 之前
+    assert names.index("fsync") < names.index("replace")
+    _, src, dst = calls[names.index("replace")]
+    assert src.parent == db.parent  # 同目录临时文件
+    assert src != db
+    assert dst == db
+
+
+@pytest.mark.parametrize("fail_at", ["write", "fsync", "replace"])
+def test_exception_mid_write_keeps_old_file_and_no_partial(db, monkeypatch, fail_at):
+    storage.save(db, [{"text": "旧内容", "done": False}])
+    before = db.read_bytes()
+
+    def boom(*a, **k):
+        raise OSError(f"模拟 {fail_at} 失败")
+
+    if fail_at == "write":
+        # 模拟磁盘写到一半：先真实写入一半内容并 flush，再抛异常
+        real_fdopen = os.fdopen
+
+        def half_fdopen(fd, *a, **k):
+            f = real_fdopen(fd, *a, **k)
+            real_write = f.write
+
+            def write(s):
+                real_write(s[: len(s) // 2])
+                f.flush()
+                raise OSError("模拟磁盘写到一半失败")
+
+            f.write = write
+            return f
+
+        monkeypatch.setattr(storage.os, "fdopen", half_fdopen)
+    elif fail_at == "fsync":
+        monkeypatch.setattr(storage.os, "fsync", boom)
+    else:
+        monkeypatch.setattr(storage.os, "replace", boom)
+
+    with pytest.raises(OSError):
+        storage.save(db, [{"text": "新内容" * 1000, "done": False}])
+
+    assert db.read_bytes() == before
+    assert _leftovers(db.parent, db) == []
+
+
+def test_exception_mid_first_write_leaves_no_file(db, monkeypatch):
+    def boom(*a, **k):
+        raise OSError("模拟 replace 失败")
+
+    monkeypatch.setattr(storage.os, "replace", boom)
+    with pytest.raises(OSError):
+        storage.save(db, [{"text": "a", "done": False}])
+    assert not db.exists()
+    assert list(db.parent.iterdir()) == []
+
+
+def test_keyboard_interrupt_mid_write_cleans_temp(db, monkeypatch):
+    storage.save(db, [{"text": "旧内容", "done": False}])
+    before = db.read_bytes()
+
+    def interrupt(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(storage.os, "replace", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        storage.save(db, [{"text": "新内容", "done": False}])
+    assert db.read_bytes() == before
+    assert _leftovers(db.parent, db) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="权限位只在 POSIX 上有意义")
+def test_save_preserves_existing_file_mode(db):
+    storage.save(db, [])
+    os.chmod(db, 0o640)
+    storage.save(db, [{"text": "a", "done": False}])
+    assert stat.S_IMODE(db.stat().st_mode) == 0o640
+
+
+@pytest.mark.skipif(os.name != "posix", reason="权限位只在 POSIX 上有意义")
+def test_new_file_mode_follows_umask_not_mkstemp_0600(db):
+    old = os.umask(0o022)
+    try:
+        storage.save(db, [])
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(db.stat().st_mode) == 0o644
+
+
+def test_save_relative_path_in_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    storage.save("todo.json", [{"text": "a", "done": False}])
+    assert storage.load("todo.json") == [{"text": "a", "done": False}]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["todo.json"]
+
+
+# ---- 损坏文件：退出码 3，且不改写 ----
+
+CORRUPT_CONTENTS = [
+    pytest.param(b"", id="empty"),
+    pytest.param(b'{"todos": [{"text": "a", "do', id="truncated"),
+    pytest.param(b"not json", id="garbage"),
+    pytest.param(b"\xff\xfe\x00bad", id="not-utf8"),
+    pytest.param(b"[1, 2, 3]", id="top-level-list"),
+    pytest.param(b'{"todos": "oops"}', id="todos-not-list"),
+    pytest.param(b'{"todos": [42]}', id="item-not-object"),
+    pytest.param(b'{"todos": [{"done": false}]}', id="item-missing-text"),
+]
+
+
+@pytest.mark.parametrize("content", CORRUPT_CONTENTS)
+def test_load_corrupt_raises(db, content):
+    db.write_bytes(content)
+    with pytest.raises(storage.CorruptDBError):
+        storage.load(db)
+
+
+@pytest.mark.parametrize("content", CORRUPT_CONTENTS)
+@pytest.mark.parametrize(
+    "argv",
+    [["add", "新待办"], ["list"], ["done", "1"], ["remove", "1"]],
+    ids=["add", "list", "done", "remove"],
+)
+def test_cli_corrupt_db_exits_3_and_does_not_rewrite(db, capsys, content, argv):
+    db.write_bytes(content)
+    mtime = db.stat().st_mtime_ns
+
+    assert main(["--db", str(db), *argv]) == 3
+
+    err = capsys.readouterr().err
+    assert "损坏" in err and str(db) in err
+    assert db.read_bytes() == content
+    assert db.stat().st_mtime_ns == mtime
+    assert _leftovers(db.parent, db) == []
+
+
+def test_python_m_corrupt_db_exits_3(tmp_path):
+    db = tmp_path / "todo.json"
+    db.write_bytes(b"{broken")
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONPATH": str(REPO_ROOT)}
+    r = subprocess.run(
+        [sys.executable, "-m", "todo_lite", "add", "x"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert r.returncode == 3
+    assert "损坏" in r.stderr
+    assert r.stdout == ""
+    assert db.read_bytes() == b"{broken"

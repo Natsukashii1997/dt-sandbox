@@ -10,6 +10,7 @@ from todo_lite import __version__, storage
 
 EXIT_OK = 0
 EXIT_USAGE = 2
+EXIT_CORRUPT_DB = 3
 
 
 def _add_db_option(parser: argparse.ArgumentParser, default: object) -> None:
@@ -119,6 +120,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     handler = _COMMANDS.get(args.command)
     if handler is not None:
-        return handler(args)
+        try:
+            return handler(args)
+        except storage.CorruptDBError as e:
+            # 损坏的数据文件一律不写回，保留原样交给用户处理。
+            print(f"错误：{e}，未做任何修改，请手动修复或移走该文件", file=sys.stderr)
+            return EXIT_CORRUPT_DB
     parser.print_help()
     return EXIT_OK

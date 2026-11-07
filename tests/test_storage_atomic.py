@@ -330,3 +330,96 @@ def test_python_m_corrupt_db_exits_3(tmp_path):
     assert "损坏" in r.stderr
     assert r.stdout == ""
     assert db.read_bytes() == b"{broken"
+
+
+# ---- 返修 2：目录 fsync 各阶段出错不影响已提交的 save；os.write 无进展 ----
+
+def _is_dir_fd(fd):
+    try:
+        return stat.S_ISDIR(os.fstat(fd).st_mode)
+    except OSError:
+        return False
+
+
+@pytest.mark.skipif(os.name != "posix", reason="目录 fsync 只在 POSIX 上执行")
+def test_dir_close_error_does_not_fail_committed_save(db, monkeypatch, capsys):
+    storage.save(db, [{"text": "旧内容", "done": False}])
+    real_close = os.close
+    hit = []
+
+    def close(fd):
+        if _is_dir_fd(fd):
+            real_close(fd)  # 真正关掉，避免泄漏，再模拟报错
+            hit.append(fd)
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+        return real_close(fd)
+
+    monkeypatch.setattr(storage.os, "close", close)
+    storage.save(db, [{"text": "新内容", "done": False}])  # 不得抛异常
+    assert hit
+    assert storage.load(db) == [{"text": "新内容", "done": False}]
+    err = capsys.readouterr().err
+    assert "警告" in err and "关闭" in err
+    assert _leftovers(db.parent, db) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="目录 fsync 只在 POSIX 上执行")
+def test_dir_open_eio_only_warns(db, monkeypatch, capsys):
+    storage.save(db, [{"text": "旧内容", "done": False}])
+    real_open = os.open
+
+    def open_(path, flags, *a, **k):
+        if Path(path) == db.parent:
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+        return real_open(path, flags, *a, **k)
+
+    monkeypatch.setattr(storage.os, "open", open_)
+    storage.save(db, [{"text": "新内容", "done": False}])
+    assert storage.load(db) == [{"text": "新内容", "done": False}]
+    err = capsys.readouterr().err
+    assert "警告" in err and "打开" in err
+    assert _leftovers(db.parent, db) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="目录 fsync 只在 POSIX 上执行")
+def test_dir_open_unsupported_is_silent(db, monkeypatch, capsys):
+    real_open = os.open
+
+    def open_(path, flags, *a, **k):
+        if Path(path) == db.parent:
+            raise OSError(errno.EINVAL, os.strerror(errno.EINVAL))
+        return real_open(path, flags, *a, **k)
+
+    monkeypatch.setattr(storage.os, "open", open_)
+    storage.save(db, [{"text": "a", "done": False}])
+    assert capsys.readouterr().err == ""
+    assert storage.load(db) == [{"text": "a", "done": False}]
+
+
+def test_write_no_progress_raises_eio_and_cleans_up(db, monkeypatch):
+    storage.save(db, [{"text": "旧内容", "done": False}])
+    before = db.read_bytes()
+    monkeypatch.setattr(storage.os, "write", lambda fd, data: 0)
+    with pytest.raises(OSError) as exc:
+        storage.save(db, [{"text": "新内容", "done": False}])
+    assert exc.value.errno == errno.EIO
+    assert "未取得进展" in str(exc.value)
+    assert db.read_bytes() == before
+    assert _leftovers(db.parent, db) == []
+
+
+def test_short_writes_are_completed(db, monkeypatch):
+    real_write = os.write
+    sizes = []
+
+    def short_write(fd, data):
+        n = real_write(fd, bytes(data[:7]))  # 每次只写一小段
+        sizes.append(n)
+        return n
+
+    monkeypatch.setattr(storage.os, "write", short_write)
+    todos = [{"text": "买牛奶" * 20, "done": False}, {"text": "写周报", "done": True}]
+    storage.save(db, todos)
+    assert len(sizes) > 1 and all(0 < n <= 7 for n in sizes)
+    assert storage.load(db) == todos
+    assert json.loads(db.read_text(encoding="utf-8")) == {"todos": todos}

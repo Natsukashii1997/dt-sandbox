@@ -75,32 +75,45 @@ def load(path: str | Path) -> list[dict]:
     return _validate(p, data)
 
 
+def _report_dir_fsync_error(directory: Path, stage: str, e: OSError) -> None:
+    """目录 fsync 各阶段的错误统一分类：平台不支持静默跳过，其余视为 I/O 故障并告警。"""
+    if e.errno in _DIR_FSYNC_UNSUPPORTED:
+        return
+    print(f"警告：目录 {directory} {stage} 失败，掉电后改动可能丢失：{e}", file=sys.stderr)
+
+
 def _fsync_dir(directory: Path) -> None:
     """replace 之后 fsync 目录，让改名本身落盘（尽力保证）。
 
-    非 POSIX 平台（如 Windows）不支持，直接跳过；POSIX 上不支持的 errno 静默跳过，
-    其他 OSError 视为真实 I/O 失败，向 stderr 告警（数据已替换，不回滚也不抛出）。
+    非 POSIX 平台（如 Windows）不支持，直接跳过。open / fsync / close 三个阶段的
+    OSError 统一处理：不支持的 errno 静默跳过，其他 errno 视为真实 I/O 故障向 stderr 告警。
+    此时 os.replace 已经提交，任何一步出错都不抛出，不得把已完成的写入报告为失败。
     """
     if os.name != "posix":
         return
     try:
         fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     except OSError as e:
-        print(f"警告：无法打开目录 {directory} 以执行 fsync：{e}", file=sys.stderr)
+        _report_dir_fsync_error(directory, "打开（用于 fsync）", e)
         return
     try:
         os.fsync(fd)
     except OSError as e:
-        if e.errno not in _DIR_FSYNC_UNSUPPORTED:
-            print(f"警告：目录 {directory} fsync 失败，掉电后改动可能丢失：{e}", file=sys.stderr)
+        _report_dir_fsync_error(directory, "fsync", e)
     finally:
-        os.close(fd)
+        try:
+            os.close(fd)
+        except OSError as e:
+            _report_dir_fsync_error(directory, "关闭（fsync 后）", e)
 
 
 def _write_all(fd: int, data: bytes) -> None:
+    """把 data 全部写入 fd；正数短写会继续写剩余部分，没有进展（n <= 0）时抛 EIO。"""
     view = memoryview(data)
     while view:
         n = os.write(fd, view)
+        if n <= 0:
+            raise OSError(errno.EIO, "写入未取得进展")
         view = view[n:]
 
 

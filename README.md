@@ -120,6 +120,13 @@ $ echo $?
 
 错误信息写到 stderr，正常输出写到 stdout。
 
-### 跑测试
+### 怎么跑测试
 
-在仓库根目录执行 `python -m pytest -q`（需先 `pip install pytest`）。
+测试用 pytest（只是开发依赖，运行 todo-lite 本身不需要）。在仓库根目录执行：
+
+```sh
+pip install pytest      # 首次需要
+python -m pytest -q
+```
+
+全部通过时最后一行形如 `150 passed in 0.53s`（用例数和耗时会随版本变化）；有失败时 pytest 会列出失败的用例并以非 0 退出码结束。

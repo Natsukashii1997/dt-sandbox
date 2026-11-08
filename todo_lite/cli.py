@@ -17,6 +17,8 @@ EXIT_IO = 1
 EXIT_USAGE = 2
 EXIT_CORRUPT_DB = 3
 
+LIST_STATUSES = ("open", "done", "all")
+
 
 def _add_db_option(parser: argparse.ArgumentParser, default: object) -> None:
     parser.add_argument(
@@ -39,6 +41,13 @@ def build_parser() -> argparse.ArgumentParser:
     _add_db_option(p_add, argparse.SUPPRESS)
 
     p_list = sub.add_parser("list", help="按新增顺序列出待办")
+    p_list.add_argument("--search", default=None, help="只显示文字包含该关键词的待办（不区分大小写）")
+    p_list.add_argument(
+        "--status",
+        choices=LIST_STATUSES,
+        default="all",
+        help="按状态筛选：open 未完成 / done 已完成 / all 全部（默认 all）",
+    )
     _add_db_option(p_list, argparse.SUPPRESS)
 
     p_done = sub.add_parser("done", help="把指定序号的待办标记为完成")
@@ -83,12 +92,33 @@ def _cmd_add(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _list_match(item: dict, needle: str | None, status: str) -> bool:
+    """判断一条待办是否满足 list 的筛选条件；needle 已 casefold，None 表示不按文字筛。"""
+    done = bool(item.get("done"))
+    if status == "open" and done:
+        return False
+    if status == "done" and not done:
+        return False
+    return needle is None or needle in item["text"].casefold()
+
+
 def _cmd_list(args: argparse.Namespace) -> int:
     todos = storage.load(args.db)
-    if not todos:
+    needle = args.search.casefold() if args.search is not None else None
+    filtering = needle is not None or args.status != "all"
+    if not todos and not filtering:
         print("暂无待办")
         return EXIT_OK
-    for i, item in enumerate(todos, start=1):
+    # 序号始终是原清单中的位置，筛选后不重新编号，done / remove 可直接使用。
+    shown = [
+        (i, item)
+        for i, item in enumerate(todos, start=1)
+        if _list_match(item, needle, args.status)
+    ]
+    if not shown:
+        print("没有符合条件的待办")
+        return EXIT_OK
+    for i, item in shown:
         mark = "[x]" if item.get("done") else "[ ]"
         print(f"{i}. {mark} {item['text']}")
     return EXIT_OK

@@ -2,7 +2,7 @@
 
 文件格式：{"todos": [{"text": "...", "done": false}, ...]}，列表顺序即新增顺序。
 
-写入保证（save）：
+写入保证（save / write_atomic；export --output 也走 write_atomic）：
 - 原子替换：先写同目录的临时文件并 fsync，再用 os.replace 替换目标文件。
   在 os.replace 提交之前发生的任何失败（含 KeyboardInterrupt）都不会改变目标文件，
   临时文件会被清理；os.replace 成功之后目标文件即为新内容。
@@ -118,7 +118,13 @@ def _write_all(fd: int, data: bytes) -> None:
 
 
 def save(path: str | Path, todos: list[dict]) -> None:
-    """原子写入待办列表：同目录临时文件 → 写入 → 设权限 → fsync → 关闭 → os.replace。
+    """原子写入待办列表（写入保证见 write_atomic）。"""
+    payload = (json.dumps({"todos": todos}, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    write_atomic(path, payload)
+
+
+def write_atomic(path: str | Path, payload: bytes) -> None:
+    """原子写入任意字节：同目录临时文件 → 写入 → 设权限 → fsync → 关闭 → os.replace。
 
     os.replace 之前的任何失败都会关闭 fd、删除临时文件并原样抛出，目标文件保持原内容。
 
@@ -127,7 +133,6 @@ def save(path: str | Path, todos: list[dict]) -> None:
     """
     p = Path(path)
     directory = p.parent if str(p.parent) else Path(".")
-    payload = (json.dumps({"todos": todos}, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     try:
         keep_mode: int | None = p.stat().st_mode & 0o777
     except FileNotFoundError:

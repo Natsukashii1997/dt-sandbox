@@ -120,6 +120,10 @@ $ echo $?
 
 错误信息写到 stderr，正常输出写到 stdout。
 
-### 跑测试
+### 怎么跑测试
 
-在仓库根目录执行 `python -m pytest -q`（需先 `pip install pytest`）。
+先 `pip install pytest`，然后在仓库根目录执行：
+
+```sh
+python -m pytest -q
+```

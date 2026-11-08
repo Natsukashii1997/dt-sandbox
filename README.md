@@ -29,10 +29,12 @@ python -m todo_lite --version   # 输出 0.1.0
 | --- | --- |
 | `add "文字"` | 新增一条待办（文字两端空白会被去掉，去掉后为空则报错） |
 | `list` | 按新增顺序列出待办：序号、状态（`[ ]` 未完成 / `[x]` 已完成）、文字 |
+| `list --search 关键词` | 只列出文字包含关键词的待办（不区分大小写的子串匹配） |
+| `list --status open\|done\|all` | 按状态筛选：`open` 未完成、`done` 已完成、`all` 全部（默认）；取值不合法时报错，退出码 2 |
 | `done <序号>` | 把该序号的待办标为完成（已完成的再标一次不报错） |
 | `remove <序号>` | 删除该序号的待办，后面的序号依次前移 |
 
-序号就是 `list` 里显示的数字，从 1 开始。
+序号就是 `list` 里显示的数字，从 1 开始。`--search` 和 `--status` 可以同时用；筛选后仍显示原序号（不重新编号），所以可以直接拿来 `done` / `remove`；没有匹配时输出 `没有符合条件的待办`，退出码 0。
 
 ### 示例
 
@@ -62,6 +64,23 @@ $ python -m todo_lite remove 1
 $ python -m todo_lite list
 1. [x] 写周报
 2. [ ] 回邮件
+```
+
+接着上面的清单筛选（序号保持原样）：
+
+```console
+$ python -m todo_lite list --status open
+2. [ ] 回邮件
+$ python -m todo_lite list --search 周报
+1. [x] 写周报
+$ python -m todo_lite list --search 周报 --status open
+没有符合条件的待办
+$ python -m todo_lite list --status closed
+usage: todo_lite list [-h] [--search SEARCH] [--status {open,done,all}]
+                      [--db DB]
+todo_lite list: error: argument --status: invalid choice: 'closed' (choose from 'open', 'done', 'all')
+$ echo $?
+2
 ```
 
 ### `--db`：指定数据文件

@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import io
+import json
 import sys
+from pathlib import Path
 from typing import Sequence
 
 from todo_lite import __version__, storage
 
 EXIT_OK = 0
+EXIT_IO = 1
 EXIT_USAGE = 2
 EXIT_CORRUPT_DB = 3
 
@@ -43,6 +48,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_remove = sub.add_parser("remove", help="删除指定序号的待办，其后序号依次前移")
     p_remove.add_argument("index", help="待办序号（list 中显示的数字，从 1 开始）")
     _add_db_option(p_remove, argparse.SUPPRESS)
+
+    p_export = sub.add_parser("export", help="按 list 的顺序导出全部待办（JSON 或 CSV）")
+    # 不用 choices / required：缺省和不合法都由 _cmd_export 给出中文错误，退出码 2。
+    p_export.add_argument("--format", dest="fmt", default=None, help="导出格式：json 或 csv（必填）")
+    p_export.add_argument("--output", default=None, help="写入该文件（原子写入）；不给则打印到标准输出")
+    _add_db_option(p_export, argparse.SUPPRESS)
 
     return parser
 
@@ -107,11 +118,72 @@ def _cmd_remove(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+EXPORT_FORMATS = ("json", "csv")
+
+
+def _export_rows(todos: list[dict]) -> list[dict]:
+    return [
+        {"id": i, "text": item["text"], "done": bool(item.get("done"))}
+        for i, item in enumerate(todos, start=1)
+    ]
+
+
+def render_json(todos: list[dict]) -> str:
+    """JSON 数组，每项 {"id", "text", "done"}；中文原样输出。空清单为 []。"""
+    return json.dumps(_export_rows(todos), ensure_ascii=False, indent=2) + "\n"
+
+
+def render_csv(todos: list[dict]) -> str:
+    """表头 id,text,done；done 写 true/false；逗号、引号、换行按 CSV 规则加引号转义。"""
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow(["id", "text", "done"])
+    for row in _export_rows(todos):
+        writer.writerow([row["id"], row["text"], "true" if row["done"] else "false"])
+    return buf.getvalue()
+
+
+_RENDERERS = {"json": render_json, "csv": render_csv}
+
+
+def _cmd_export(args: argparse.Namespace) -> int:
+    fmt = args.fmt
+    if fmt is None:
+        print("错误：缺少 --format（可选：json、csv）", file=sys.stderr)
+        return EXIT_USAGE
+    if fmt not in EXPORT_FORMATS:
+        print(f"错误：不支持的导出格式：{fmt}（可选：json、csv）", file=sys.stderr)
+        return EXIT_USAGE
+    if args.output is not None:
+        if not args.output.strip():
+            print("错误：--output 不能为空", file=sys.stderr)
+            return EXIT_USAGE
+        out = Path(args.output)
+        if out.resolve() == Path(args.db).resolve():
+            print(f"错误：--output 不能与数据文件相同：{args.output}", file=sys.stderr)
+            return EXIT_USAGE
+
+    todos = storage.load(args.db)
+    content = _RENDERERS[fmt](todos)
+
+    if args.output is None:
+        sys.stdout.write(content)
+        return EXIT_OK
+    try:
+        storage.write_atomic(args.output, content.encode("utf-8"))
+    except OSError as e:
+        print(f"错误：无法写入导出文件 {args.output}：{e}", file=sys.stderr)
+        return EXIT_IO
+    print(f"已导出 {len(todos)} 条待办到 {args.output}（{fmt}）")
+    return EXIT_OK
+
+
 _COMMANDS = {
     "add": _cmd_add,
     "list": _cmd_list,
     "done": _cmd_done,
     "remove": _cmd_remove,
+    "export": _cmd_export,
 }
 
 

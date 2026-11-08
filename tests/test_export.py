@@ -262,3 +262,35 @@ def test_db_option_after_subcommand(db, capsys):
     _seed(db, [{"text": "a", "done": True}])
     assert main(["export", "--format", "json", "--db", str(db)]) == 0
     assert json.loads(capsys.readouterr().out) == [{"id": 1, "text": "a", "done": True}]
+
+
+# ---- SBX-29：独立回车 \r 也必须加引号（SBX-28 P1） ----
+
+CR_TEXTS = ["\rb", "a\rb", "a\r", "a\r\rb", "x,\ry", '"\r"']
+
+
+@pytest.mark.parametrize("text", CR_TEXTS)
+def test_csv_bare_cr_round_trips_stdout(db, capsys, text):
+    _seed(db, [{"text": text, "done": False}])
+    assert _run(db, "--format", "csv") == 0
+    out = capsys.readouterr().out
+    assert list(csv.reader(io.StringIO(out, newline=""))) == [
+        ["id", "text", "done"],
+        ["1", text, "false"],
+    ]
+
+
+@pytest.mark.parametrize("text", CR_TEXTS)
+def test_csv_bare_cr_round_trips_output_file(db, tmp_path, capsys, text):
+    _seed(db, [{"text": text, "done": True}, {"text": "next", "done": False}])
+    out = tmp_path / "out.csv"
+    assert _run(db, "--format", "csv", "--output", str(out)) == 0
+    with out.open(encoding="utf-8", newline="") as f:
+        rows = list(csv.reader(f))
+    assert rows == [["id", "text", "done"], ["1", text, "true"], ["2", "next", "false"]]
+
+
+def test_csv_bare_cr_field_is_quoted_and_line_endings_stay_lf(db, capsys):
+    _seed(db, [{"text": "a\rb", "done": False}])
+    assert _run(db, "--format", "csv") == 0
+    assert capsys.readouterr().out == 'id,text,done\n1,"a\rb",false\n'

@@ -163,14 +163,21 @@ def render_json(todos: list[dict]) -> str:
     return json.dumps(_export_rows(todos), ensure_ascii=False, indent=2) + "\n"
 
 
-def render_csv(todos: list[dict]) -> str:
-    """表头 id,text,done；done 写 true/false；逗号、引号、换行按 CSV 规则加引号转义。"""
+def _csv_line(fields: list) -> str:
+    # Python 3.11 的 csv.writer 只在字段含 lineterminator 里的字符时才加引号；
+    # 用 "\r\n" 作行尾，才能让独立的 \r 和 \n 都触发加引号（SBX-28 P1）。
+    # 写完再把行尾统一换回 "\n"，保持原有输出格式不变。
     buf = io.StringIO()
-    writer = csv.writer(buf, lineterminator="\n")
-    writer.writerow(["id", "text", "done"])
+    csv.writer(buf, lineterminator="\r\n").writerow(fields)
+    return buf.getvalue().removesuffix("\r\n") + "\n"
+
+
+def render_csv(todos: list[dict]) -> str:
+    """表头 id,text,done；done 写 true/false；逗号、引号、回车（含独立 CR）、换行按 CSV 规则加引号转义。"""
+    lines = [_csv_line(["id", "text", "done"])]
     for row in _export_rows(todos):
-        writer.writerow([row["id"], row["text"], "true" if row["done"] else "false"])
-    return buf.getvalue()
+        lines.append(_csv_line([row["id"], row["text"], "true" if row["done"] else "false"]))
+    return "".join(lines)
 
 
 _RENDERERS = {"json": render_json, "csv": render_csv}

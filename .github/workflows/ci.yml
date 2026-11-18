@@ -1,0 +1,24 @@
+# 最小 CI（digital-twin #195 批 0B-6）：PR 上跑 todo-lite 的全部测试。
+# 只在 PR 上触发：合并到 main（PR 关闭）不触发任何工作流。只读令牌，不用密钥，没有外部动作。
+# 检查名 test 登记在 digital-twin 的合并规则里；改这个文件属 L3，由常浩合并。
+name: CI
+on:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    runs-on: ubuntu-24.04   # 固定版本，不用 ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'   # pyproject 要求 >=3.11，用最低版本跑
+      - run: python -m pip install pytest==9.2.0
+      - run: python -m pytest -q

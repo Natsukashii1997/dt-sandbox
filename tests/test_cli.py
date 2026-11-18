@@ -11,7 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_version_constant():
-    assert __version__ == "0.1.0"
+    assert __version__ == "9.9.9"  # 故意弄坏：验证 CI 会变红
 
 
 def test_main_version_flag(capsys):

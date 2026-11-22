@@ -144,3 +144,5 @@ $ echo $?
 ### 跑测试
 
 在仓库根目录执行 `python -m pytest -q`（需先 `pip install pytest`）。
+
+首单联调 2026-11-22
